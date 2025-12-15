@@ -40,6 +40,10 @@ class MemoryProcessor:
         
         # 1. 尝试从配置加载
         reflection_config = self.config.get("reflection_engine", {})
+        
+        # [DEBUG] 打印配置检查日志
+        logger.info(f"[MemoryProcessor] 检查自定义 Prompt 配置: {reflection_config.keys()}")
+        
         custom_private = reflection_config.get("custom_private_summary_prompt", "")
         custom_group = reflection_config.get("custom_group_summary_prompt", "")
 
