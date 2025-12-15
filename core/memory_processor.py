@@ -20,32 +20,47 @@ class MemoryProcessor:
     支持私聊和群聊两种场景的不同处理策略。
     """
 
-    def __init__(self, llm_provider):
+    def __init__(self, llm_provider, config: dict = None):
         """
         初始化记忆处理器
 
         Args:
             llm_provider: LLM提供者实例(Provider类型)
+            config: 插件配置字典
         """
         self.llm_provider = llm_provider
+        self.config = config or {}
 
         # 加载提示词模板
         self._load_prompts()
 
     def _load_prompts(self) -> None:
-        """从外部文件加载提示词模板"""
+        """从外部文件加载提示词模板，优先使用配置中的自定义模板"""
         prompt_dir = Path(__file__).parent / "prompts"
+        
+        # 1. 尝试从配置加载
+        reflection_config = self.config.get("reflection_engine", {})
+        custom_private = reflection_config.get("custom_private_summary_prompt", "")
+        custom_group = reflection_config.get("custom_group_summary_prompt", "")
 
         try:
             # 加载私聊提示词
-            private_prompt_file = prompt_dir / "private_chat_prompt.txt"
-            with open(private_prompt_file, encoding="utf-8") as f:
-                self.private_chat_prompt = f.read()
+            if custom_private:
+                self.private_chat_prompt = custom_private
+                logger.info("[MemoryProcessor] 使用配置中的自定义私聊 Prompt")
+            else:
+                private_prompt_file = prompt_dir / "private_chat_prompt.txt"
+                with open(private_prompt_file, encoding="utf-8") as f:
+                    self.private_chat_prompt = f.read()
 
             # 加载群聊提示词
-            group_prompt_file = prompt_dir / "group_chat_prompt.txt"
-            with open(group_prompt_file, encoding="utf-8") as f:
-                self.group_chat_prompt = f.read()
+            if custom_group:
+                self.group_chat_prompt = custom_group
+                logger.info("[MemoryProcessor] 使用配置中的自定义群聊 Prompt")
+            else:
+                group_prompt_file = prompt_dir / "group_chat_prompt.txt"
+                with open(group_prompt_file, encoding="utf-8") as f:
+                    self.group_chat_prompt = f.read()
 
             logger.info("[MemoryProcessor] 提示词模板加载成功")
 
