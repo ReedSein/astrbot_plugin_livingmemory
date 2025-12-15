@@ -274,7 +274,7 @@ class LivingMemoryPlugin(Star):
             # 6.6. 初始化 MemoryProcessor（记忆处理器）
             if not self.llm_provider:
                 raise ValueError("LLM Provider 未初始化，无法创建 MemoryProcessor")
-            self.memory_processor = MemoryProcessor(self.llm_provider)
+            self.memory_processor = MemoryProcessor(self.llm_provider, config=self.config)
             logger.info(" MemoryProcessor 已初始化")
 
             # 6.7. 初始化索引验证器并自动重建索引
@@ -634,6 +634,29 @@ class LivingMemoryPlugin(Star):
 
         return removed_count
 
+    def _format_content_with_metadata(self, event: AstrMessageEvent, content: str) -> str:
+        """格式化消息内容，添加元数据（时间、发送者信息）"""
+        try:
+            # 尝试获取时间戳，优先使用 message_obj.timestamp
+            timestamp_val = 0
+            if hasattr(event, "message_obj") and hasattr(event.message_obj, "timestamp"):
+                timestamp_val = event.message_obj.timestamp
+            elif hasattr(event, "timestamp"):
+                timestamp_val = event.timestamp
+            else:
+                timestamp_val = int(time.time())
+
+            # 转换为可读时间字符串
+            timestamp_str = datetime.fromtimestamp(timestamp_val).strftime("%Y-%m-%d %H:%M:%S")
+            
+            sender_name = event.get_sender_name() or "未知用户"
+            sender_id = event.get_sender_id() or "unknown"
+            
+            return f"[{timestamp_str}] {sender_name}({sender_id}): {content}"
+        except Exception:
+            # 降级：如果格式化失败，返回原内容
+            return content
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     async def handle_all_group_messages(self, event: AstrMessageEvent):
         """[事件钩子] 捕获所有群聊消息(包括非@Bot的消息)用于记忆存储"""
@@ -673,6 +696,10 @@ class LivingMemoryPlugin(Star):
 
             # 确定角色
             role = "assistant" if is_bot_message else "user"
+
+            # [元数据增强] 格式化消息内容
+            if not is_bot_message: # 仅增强用户消息，Bot消息通常不需要这么详细的ID
+                content = self._format_content_with_metadata(event, content)
 
             # 存储消息到数据库，并立即标记metadata
             message = await self.conversation_manager.add_message_from_event(
@@ -913,6 +940,9 @@ class LivingMemoryPlugin(Star):
                     is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
                     if not is_group:
                         message_to_store = ChatroomContextParser.extract_actual_message(req.prompt)
+                        # [元数据增强] 格式化消息内容
+                        message_to_store = self._format_content_with_metadata(event, message_to_store)
+                        
                         await self.conversation_manager.add_message_from_event(
                             event=event,
                             role="user",
@@ -948,18 +978,25 @@ class LivingMemoryPlugin(Star):
             return
 
         try:
-            # 使用 unified_msg_origin 作为 session_id，确保多Bot场景下的唯一性
+            # 使用 unified_msg_origin 作为 session_id
             session_id = event.unified_msg_origin
             logger.debug(f"[DEBUG-Reflection] 获取到 unified_msg_origin: {session_id}")
             if not session_id:
                 logger.warning("[DEBUG-Reflection] session_id 为空，跳过反思")
                 return
 
+            # [元数据增强] Bot 回复统一使用 "Rosa"
+            bot_name = "Rosa"
+            timestamp_val = int(time.time())
+            timestamp_str = datetime.fromtimestamp(timestamp_val).strftime("%Y-%m-%d %H:%M:%S")
+            formatted_content = f"[{timestamp_str}] {bot_name}(Bot): {resp.completion_text}"
+
             # 使用 ConversationManager 添加助手响应
+            # 注意：这里我们存入的是格式化后的内容，这样记忆处理器就能看到 "Rosa" 这个名字
             await self.conversation_manager.add_message_from_event(
                 event=event,
                 role="assistant",
-                content=resp.completion_text,
+                content=formatted_content,
             )
             logger.debug(f"[DEBUG-Reflection] [{session_id}] 已添加助手响应消息")
 
