@@ -274,7 +274,8 @@ class LivingMemoryPlugin(Star):
             # 6.6. 初始化 MemoryProcessor（记忆处理器）
             if not self.llm_provider:
                 raise ValueError("LLM Provider 未初始化，无法创建 MemoryProcessor")
-            self.memory_processor = MemoryProcessor(self.llm_provider)
+            # [Fix] 传入 config 以支持自定义 Prompt
+            self.memory_processor = MemoryProcessor(self.llm_provider, config=self.config)
             logger.info(" MemoryProcessor 已初始化")
 
             # 6.7. 初始化索引验证器并自动重建索引
