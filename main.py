@@ -655,14 +655,6 @@ class LivingMemoryPlugin(Star):
 
         try:
             session_id = event.unified_msg_origin
-            
-            # 检测并警告异常的session_id
-            if session_id and ("Error:" in session_id or "error:" in session_id.lower()):
-                logger.warning(
-                    f"检测到异常的session_id: {session_id}。"
-                    f"这可能是平台适配器初始化问题，建议检查平台配置。"
-                )
-            
             message_id = event.message_obj.message_id
 
             # 消息去重检查
@@ -839,9 +831,9 @@ class LivingMemoryPlugin(Star):
                 except Exception as e:
                     logger.error(f"删除旧消息失败: {e}", exc_info=True)
 
-    @filter.on_llm_request()
+    @filter.on_llm_request(priority=95)
     async def handle_memory_recall(self, event: AstrMessageEvent, req: ProviderRequest):
-        """[事件钩子] 在 LLM 请求前，查询并注入长期记忆"""
+        """[事件钩子] 在 LLM 请求前，查询并注入长期记忆 (Variable Injection Mode)"""
         if not await self._ensure_initialized():
             logger.debug("插件未完成初始化，跳过记忆召回")
             return
@@ -851,162 +843,76 @@ class LivingMemoryPlugin(Star):
             return
 
         try:
-            # 使用 unified_msg_origin 作为 session_id，确保多Bot场景下的唯一性
+            # 使用 unified_msg_origin 作为 session_id
             session_id = event.unified_msg_origin
             logger.debug(f"[DEBUG-Recall] 获取到 unified_msg_origin: {session_id}")
-            
-            # 检测并警告异常的session_id
-            if session_id and ("Error:" in session_id or "error:" in session_id.lower()):
-                logger.warning(
-                    f"[{session_id}] 检测到异常的session_id，这可能导致记忆功能异常。"
-                    f"建议检查平台适配器配置或重启AstrBot。"
-                )
 
             async with OperationContext("记忆召回", session_id):
-                # 首先检查是否需要自动删除旧的注入记忆
+                # 自动删除旧的注入记忆逻辑可保留或根据需求移除，这里暂时保留
                 auto_remove = self.config.get("recall_engine", {}).get(
                     "auto_remove_injected", True
                 )
                 if auto_remove:
                     self._remove_injected_memories_from_context(req, session_id)
-                # 根据配置决定是否进行过滤
+                
+                # 过滤设置
                 filtering_config = self.config.get("filtering_settings", {})
-                use_persona_filtering = filtering_config.get(
-                    "use_persona_filtering", True
-                )
-                use_session_filtering = filtering_config.get(
-                    "use_session_filtering", True
-                )
-
+                use_persona_filtering = filtering_config.get("use_persona_filtering", True)
+                use_session_filtering = filtering_config.get("use_session_filtering", True)
                 persona_id = await get_persona_id(self.context, event)
-
-                # 调试：输出过滤参数
-                logger.debug(
-                    f"[{session_id}] 过滤参数: session_id={session_id}, persona_id={persona_id}, "
-                    f"use_session={use_session_filtering}, use_persona={use_persona_filtering}"
-                )
 
                 recall_session_id = session_id if use_session_filtering else None
                 recall_persona_id = persona_id if use_persona_filtering else None
 
-                # ===== 问题1修复：提取真实用户消息用于召回 =====
-                # 检查 prompt 是否为 None
                 if not req.prompt:
-                    logger.warning(f"[{session_id}] req.prompt 为空，跳过记忆召回")
                     return
 
-                # 自动检测并提取（如果不是特殊格式则返回原值）
                 actual_query = ChatroomContextParser.extract_actual_message(req.prompt)
 
-                if actual_query != req.prompt:
-                    logger.info(
-                        f"[{session_id}]  检测到群聊上下文格式，已提取真实消息用于召回 "
-                        f"(原始: {len(req.prompt)}字符 → 提取: {len(actual_query)}字符)"
-                    )
-
-                # 使用 MemoryEngine 进行智能回忆
                 logger.info(
-                    f"[{session_id}] 开始记忆召回，查询='{actual_query[:50]}...'，top_k={self.config.get('recall_engine', {}).get('top_k', 5)}"
+                    f"[{session_id}] 开始记忆召回，查询='{actual_query[:50]}...'"
                 )
 
                 recalled_memories = await self.memory_engine.search_memories(
-                    query=actual_query,  # 使用提取的真实消息
+                    query=actual_query,
                     k=self.config.get("recall_engine", {}).get("top_k", 5),
                     session_id=recall_session_id,
                     persona_id=recall_persona_id,
                 )
 
                 if recalled_memories:
-                    logger.info(
-                        f"[{session_id}] 检索到 {len(recalled_memories)} 条记忆"
-                    )
+                    logger.info(f"[{session_id}] 检索到 {len(recalled_memories)} 条记忆")
 
-                    # 格式化并注入记忆（包含完整元数据）
                     memory_list = [
                         {
                             "content": mem.content,
                             "score": mem.final_score,
-                            "metadata": mem.metadata,  # 传递完整的元数据
+                            "metadata": mem.metadata,
                         }
                         for mem in recalled_memories
                     ]
 
-                    # 输出详细的记忆信息
-                    for i, mem in enumerate(recalled_memories, 1):
-                        logger.debug(
-                            f"[{session_id}] 记忆 #{i}: 得分={mem.final_score:.3f}, "
-                            f"重要性={mem.metadata.get('importance', 0.5):.2f}, "
-                            f"内容={mem.content[:100]}..."
-                        )
-
-                    # 根据配置选择记忆注入方式
-                    injection_method = self.config.get("recall_engine", {}).get(
-                        "injection_method", "system_prompt"
-                    )
-
+                    # 格式化记忆
                     memory_str = format_memories_for_injection(memory_list)
-                    logger.info(
-                        f"[{session_id}] 格式化后的记忆字符串长度={len(memory_str)}, 注入方式={injection_method}"
-                    )
-                    logger.debug(
-                        f"[{session_id}] 注入的记忆内容（前500字符）:\n{memory_str[:500]}"
-                    )
+                    
+                    # [关键修改] 变量注入模式：挂载到 event 对象，不修改 req.prompt
+                    event._dynamic_memory_context = memory_str
+                    
+                    logger.info(f"[{session_id}] 记忆已挂载到 event._dynamic_memory_context (长度: {len(memory_str)})")
+                    logger.debug(f"[{session_id}] 挂载内容预览:\n{memory_str[:200]}...")
 
-                    if injection_method == "user_message_before":
-                        # 在用户消息前插入记忆
-                        if req.prompt:
-                            req.prompt = memory_str + "\n\n" + req.prompt
-                        else:
-                            req.prompt = memory_str
-                        logger.info(
-                            f"[{session_id}]  成功向用户消息前注入 {len(recalled_memories)} 条记忆"
-                        )
-                    elif injection_method == "user_message_after":
-                        # 在用户消息后插入记忆
-                        if req.prompt:
-                            req.prompt = req.prompt + "\n\n" + memory_str
-                        else:
-                            req.prompt = memory_str
-                        logger.info(
-                            f"[{session_id}]  成功向用户消息后注入 {len(recalled_memories)} 条记忆"
-                        )
-                    else:
-                        # 默认：注入到 system_prompt
-                        if req.system_prompt:
-                            req.system_prompt = memory_str + "\n" + req.system_prompt
-                        else:
-                            req.system_prompt = memory_str
-                        logger.info(
-                            f"[{session_id}]  成功向 System Prompt 注入 {len(recalled_memories)} 条记忆"
-                        )
                 else:
                     logger.info(f"[{session_id}] 未找到相关记忆")
+                    # 确保变量存在，避免下游报错
+                    if not hasattr(event, "_dynamic_memory_context"):
+                        event._dynamic_memory_context = "（暂无相关历史记忆）"
 
-                # ===== 问题3修复：避免存储完整上下文到数据库 =====
-                # ===== 避免重复存储：handle_all_group_messages 已经捕获了群聊消息 =====
+                # 存储逻辑保持不变
                 if self.conversation_manager and req.prompt:
-                    # 检查是否为群聊消息
                     from astrbot.api.platform import MessageType
-
                     is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
-
-                    # 群聊消息已被 handle_all_group_messages 捕获，跳过重复存储
-                    if is_group:
-                        logger.debug(
-                            f"[{session_id}] 群聊消息已由 handle_all_group_messages 捕获，跳过重复存储"
-                        )
-                    else:
-                        # 私聊消息：提取真实消息存储（避免数据库膨胀）
-                        message_to_store = ChatroomContextParser.extract_actual_message(
-                            req.prompt
-                        )
-
-                        if message_to_store != req.prompt:
-                            logger.debug(
-                                f"[{session_id}]  只存储真实消息到数据库 "
-                                f"({len(req.prompt)} → {len(message_to_store)}字符，避免数据库膨胀)"
-                            )
-
+                    if not is_group:
+                        message_to_store = ChatroomContextParser.extract_actual_message(req.prompt)
                         await self.conversation_manager.add_message_from_event(
                             event=event,
                             role="user",
@@ -1045,17 +951,9 @@ class LivingMemoryPlugin(Star):
             # 使用 unified_msg_origin 作为 session_id，确保多Bot场景下的唯一性
             session_id = event.unified_msg_origin
             logger.debug(f"[DEBUG-Reflection] 获取到 unified_msg_origin: {session_id}")
-            
             if not session_id:
                 logger.warning("[DEBUG-Reflection] session_id 为空，跳过反思")
                 return
-            
-            # 检测并警告异常的session_id
-            if "Error:" in session_id or "error:" in session_id.lower():
-                logger.warning(
-                    f"[{session_id}] 检测到异常的session_id，这可能导致记忆总结异常。"
-                    f"建议检查平台适配器配置或重启AstrBot。"
-                )
 
             # 使用 ConversationManager 添加助手响应
             await self.conversation_manager.add_message_from_event(
