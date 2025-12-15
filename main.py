@@ -649,10 +649,16 @@ class LivingMemoryPlugin(Star):
             # 转换为可读时间字符串
             timestamp_str = datetime.fromtimestamp(timestamp_val).strftime("%Y-%m-%d %H:%M:%S")
             
-            sender_name = event.get_sender_name() or "未知用户"
-            sender_id = event.get_sender_id() or "unknown"
+            sender_id = event.get_sender_id()
+            self_id = event.get_self_id()
             
-            return f"[{timestamp_str}] {sender_name}({sender_id}): {content}"
+            if sender_id == self_id:
+                # [Operation Rosa] Bot 强制改名为 Rosa，且不带 (Bot) 后缀
+                return f"[{timestamp_str}] Rosa: {content}"
+            else:
+                sender_name = event.get_sender_name() or "未知用户"
+                sender_id_str = sender_id or "unknown"
+                return f"[{timestamp_str}] {sender_name}({sender_id_str}): {content}"
         except Exception:
             # 降级：如果格式化失败，返回原内容
             return content
@@ -986,10 +992,15 @@ class LivingMemoryPlugin(Star):
                 return
 
             # [元数据增强] Bot 回复统一使用 "Rosa"
-            bot_name = "Rosa"
+            # 使用 _format_content_with_metadata 保证格式统一
+            formatted_content = self._format_content_with_metadata(event, resp.completion_text)
+            
+            # 由于 _format_content_with_metadata 依赖 event 中的 sender_id 来判断是否为 Bot
+            # 而 event 通常是用户发来的消息，其 sender_id 是用户 ID
+            # 所以我们需要手动构造一个伪造的 content，或者为了简单起见，直接在这里使用统一的格式化逻辑
             timestamp_val = int(time.time())
             timestamp_str = datetime.fromtimestamp(timestamp_val).strftime("%Y-%m-%d %H:%M:%S")
-            formatted_content = f"[{timestamp_str}] {bot_name}(Bot): {resp.completion_text}"
+            formatted_content = f"[{timestamp_str}] Rosa: {resp.completion_text}"
 
             # 使用 ConversationManager 添加助手响应
             # 注意：这里我们存入的是格式化后的内容，这样记忆处理器就能看到 "Rosa" 这个名字
